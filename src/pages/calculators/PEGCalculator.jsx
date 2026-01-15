@@ -21,7 +21,6 @@ function PEGCalculator() {
       setStockPrice(stockData.price ? stockData.price.toString() : '')
       setEps(stockData.eps ? stockData.eps.toString() : '')
       setGrowthRate(stockData.profitGrowth3Y ? stockData.profitGrowth3Y.toString() : '10')
-      console.log('PEG计算器填充数据:', stockData)
     } else {
       setPE('')
       setStockPrice('')
