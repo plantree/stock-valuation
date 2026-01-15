@@ -1,10 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { searchStock, getAllStocks, getStockData, fetchRealStockData, searchStockOnline } from '../services/stockDataService'
+import { searchStock, getAllStocks, getStockData, fetchRealStockData, searchStockOnline, MarketType } from '../services/stockDataService'
 
 /**
  * 股票搜索选择器组件
  * 支持按代码或名称搜索股票，并获取财务数据
  * 支持键盘上下箭头导航和回车选择
+ * 支持A股、港股、美股
  */
 export default function StockSelector({ onSelect, className = '' }) {
   const [query, setQuery] = useState('')
@@ -14,9 +15,18 @@ export default function StockSelector({ onSelect, className = '' }) {
   const [loading, setLoading] = useState(false)
   const [useOnline, setUseOnline] = useState(true) // 是否使用在线查询
   const [activeIndex, setActiveIndex] = useState(-1) // 键盘导航当前索引
+  const [marketFilter, setMarketFilter] = useState('all') // 市场筛选: 'all', 'CN', 'HK', 'US'
   const inputRef = useRef(null)
   const dropdownRef = useRef(null)
   const itemRefs = useRef([]) // 选项元素引用，用于滚动
+
+  // 市场选项
+  const marketOptions = [
+    { value: 'all', label: '全部' },
+    { value: 'CN', label: 'A股' },
+    { value: 'HK', label: '港股' },
+    { value: 'US', label: '美股' },
+  ]
 
   // 防抖搜索
   const debounceRef = useRef(null)
@@ -34,8 +44,8 @@ export default function StockSelector({ onSelect, className = '' }) {
     try {
       let searchResults
       if (useOnline) {
-        // 先尝试在线搜索
-        searchResults = await searchStockOnline(keyword)
+        // 先尝试在线搜索，传入市场筛选参数
+        searchResults = await searchStockOnline(keyword, marketFilter)
       }
       
       // 如果在线搜索失败或返回空，使用本地搜索
@@ -54,7 +64,7 @@ export default function StockSelector({ onSelect, className = '' }) {
     } finally {
       setLoading(false)
     }
-  }, [useOnline])
+  }, [useOnline, marketFilter])
 
   // 输入变化时的搜索（带防抖）
   useEffect(() => {
@@ -136,8 +146,8 @@ export default function StockSelector({ onSelect, className = '' }) {
     try {
       let stockData
       if (useOnline) {
-        // 尝试获取实时数据
-        stockData = await fetchRealStockData(stock.code)
+        // 尝试获取实时数据，传入市场类型
+        stockData = await fetchRealStockData(stock.fullCode || stock.code, stock.marketType)
       } else {
         stockData = getStockData(stock.code)
       }
@@ -165,7 +175,7 @@ export default function StockSelector({ onSelect, className = '' }) {
     
     setLoading(true)
     try {
-      const freshData = await fetchRealStockData(selectedStock.code?.replace(/\.(SH|SZ)$/i, '') || '')
+      const freshData = await fetchRealStockData(selectedStock.code || '', selectedStock.marketType)
       setSelectedStock(freshData)
       if (onSelect && freshData) {
         onSelect(freshData)
@@ -193,15 +203,27 @@ export default function StockSelector({ onSelect, className = '' }) {
         <label className="block text-sm font-medium text-gray-700">
           股票代码/名称
         </label>
-        <label className="flex items-center text-xs text-gray-500 cursor-pointer">
-          <input
-            type="checkbox"
-            checked={useOnline}
-            onChange={(e) => setUseOnline(e.target.checked)}
-            className="mr-1 w-3 h-3"
-          />
-          实时查询
-        </label>
+        <div className="flex items-center gap-3">
+          {/* 市场选择器 */}
+          <select
+            value={marketFilter}
+            onChange={(e) => setMarketFilter(e.target.value)}
+            className="text-xs border border-gray-300 rounded px-1 py-0.5 text-gray-600 focus:ring-1 focus:ring-primary-500"
+          >
+            {marketOptions.map(opt => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+          <label className="flex items-center text-xs text-gray-500 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={useOnline}
+              onChange={(e) => setUseOnline(e.target.checked)}
+              className="mr-1 w-3 h-3"
+            />
+            实时查询
+          </label>
+        </div>
       </div>
       
       <div className="relative">
@@ -212,7 +234,7 @@ export default function StockSelector({ onSelect, className = '' }) {
           onChange={(e) => setQuery(e.target.value)}
           onFocus={() => setShowDropdown(true)}
           onKeyDown={handleKeyDown}
-          placeholder="输入股票代码或名称搜索..."
+          placeholder={`搜索${marketFilter === 'all' ? 'A股/港股/美股' : marketOptions.find(o => o.value === marketFilter)?.label}...`}
           className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary-500 focus:border-primary-500 pr-10"
         />
         {loading ? (
@@ -254,7 +276,13 @@ export default function StockSelector({ onSelect, className = '' }) {
                 <span className="font-medium text-gray-900">{stock.code}</span>
                 <span className="ml-2 text-gray-600">{stock.name}</span>
               </span>
-              <span className="text-xs text-gray-400">{stock.industry || stock.market}</span>
+              <span className={`text-xs px-1.5 py-0.5 rounded ${
+                stock.marketType === 'US' ? 'bg-blue-100 text-blue-700' :
+                stock.marketType === 'HK' ? 'bg-red-100 text-red-700' :
+                'bg-gray-100 text-gray-600'
+              }`}>
+                {stock.market}
+              </span>
             </button>
           ))}
         </div>
@@ -265,12 +293,19 @@ export default function StockSelector({ onSelect, className = '' }) {
         <div className="mt-3 p-3 bg-primary-50 rounded-lg">
           <div className="flex justify-between items-start">
             <div>
-              <div className="font-medium text-primary-900">
+              <div className="font-medium text-primary-900 flex items-center gap-2">
                 {selectedStock.name} ({selectedStock.code})
+                <span className={`text-xs px-1.5 py-0.5 rounded ${
+                  selectedStock.marketType === 'US' ? 'bg-blue-100 text-blue-700' :
+                  selectedStock.marketType === 'HK' ? 'bg-red-100 text-red-700' :
+                  'bg-green-100 text-green-700'
+                }`}>
+                  {selectedStock.market}
+                </span>
               </div>
               <div className="text-sm text-primary-700 mt-1">
                 行业: {selectedStock.industry || '未知'} 
-                {selectedStock.marketCap && ` | 市值: ${selectedStock.marketCap}亿`}
+                {selectedStock.marketCap && ` | 市值: ${selectedStock.marketCap}${selectedStock.marketType === 'US' ? 'B' : '亿'}`}
               </div>
               {selectedStock.updateTime && (
                 <div className="text-xs text-primary-600 mt-1">
@@ -281,7 +316,8 @@ export default function StockSelector({ onSelect, className = '' }) {
             </div>
             <div className="text-right">
               <div className="text-lg font-bold text-primary-900">
-                ¥{selectedStock.price?.toFixed(2) || '--'}
+                {selectedStock.currency === 'USD' ? '$' : selectedStock.currency === 'HKD' ? 'HK$' : '¥'}
+                {selectedStock.price?.toFixed(2) || '--'}
               </div>
               <div className="text-xs text-primary-600">当前价格</div>
               {useOnline && (
@@ -323,7 +359,7 @@ export default function StockSelector({ onSelect, className = '' }) {
       {/* 提示信息 */}
       <p className="mt-2 text-xs text-gray-500">
         {useOnline 
-          ? '✓ 实时查询已开启，数据来自新浪/东方财富API' 
+          ? `✓ 实时查询已开启，支持A股/港股/美股 (数据来自新浪/东方财富API)` 
           : '○ 使用本地缓存数据，勾选"实时查询"获取最新数据'}
       </p>
     </div>
