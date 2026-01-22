@@ -429,13 +429,13 @@ export async function fetchEastMoneyFinance(code, marketType = null) {
       secucode = `${pureCode.toUpperCase()}.O`  // 默认纳斯达克
       url = `/api/eastmoney/data/securities/api/data/get?type=RPT_USF10_FN_GMAININDICATOR&sty=ALL&filter=(SECUCODE="${secucode}")&p=1&ps=8&sr=-1&st=REPORT_DATE`
     } else if (actualMarket === MarketType.HK) {
-      // 港股财务数据
+      // 港股财务数据 - 获取多期数据用于计算TTM EPS
       secucode = `${pureCode}.HK`
-      url = `/api/eastmoney/data/securities/api/data/get?type=RPT_HKF10_FN_MAININDICATOR&sty=ALL&filter=(SECUCODE="${secucode}")&p=1&ps=1&sr=-1&st=REPORT_DATE`
+      url = `/api/eastmoney/data/securities/api/data/get?type=RPT_HKF10_FN_MAININDICATOR&sty=ALL&filter=(SECUCODE="${secucode}")&p=1&ps=6&sr=-1&st=REPORT_DATE`
     } else {
-      // A股财务数据
+      // A股财务数据 - 获取多期数据用于计算TTM EPS
       secucode = `${pureCode}.${market}`
-      url = `/api/eastmoney/data/securities/api/data/get?type=RPT_F10_FINANCE_MAINFINADATA&sty=ALL&filter=(SECUCODE="${secucode}")&p=1&ps=1&sr=-1&st=REPORT_DATE`
+      url = `/api/eastmoney/data/securities/api/data/get?type=RPT_F10_FINANCE_MAINFINADATA&sty=ALL&filter=(SECUCODE="${secucode}")&p=1&ps=6&sr=-1&st=REPORT_DATE`
     }
     
     const response = await fetch(url)
@@ -449,14 +449,19 @@ export async function fetchEastMoneyFinance(code, marketType = null) {
     if (data.result?.data?.[0]) {
       const allData = data.result.data
       
-      // 美股额外获取股东权益数据用于计算BPS
-      let equity = 0
+      // 美股额外获取资产负债表数据（股东权益和总负债）和现金流数据（FCF）
+      let balanceSheet = { equity: 0, totalDebt: 0 }
+      let cashFlow = { operatingCashFlow: 0, capitalExpenditure: 0, fcf: 0 }
       if (actualMarket === MarketType.US) {
-        equity = await fetchUSStockEquity(secucode)
+        // 并行获取资产负债表和现金流数据
+        [balanceSheet, cashFlow] = await Promise.all([
+          fetchUSStockBalanceSheet(secucode),
+          fetchUSStockCashFlow(secucode)
+        ])
       }
       
       // 标准化不同市场的字段名，传入完整数据用于计算TTM
-      return normalizeFinanceData(allData, actualMarket, equity)
+      return normalizeFinanceData(allData, actualMarket, balanceSheet, cashFlow)
     }
     
     return null
@@ -467,22 +472,68 @@ export async function fetchEastMoneyFinance(code, marketType = null) {
 }
 
 /**
- * 获取美股股东权益（用于计算BPS）
+ * 获取美股资产负债表数据（股东权益和总负债）
  */
-async function fetchUSStockEquity(secucode) {
+async function fetchUSStockBalanceSheet(secucode) {
   try {
-    // 获取资产负债表中的股东权益合计 (STD_ITEM_CODE=004017999)
-    const url = `/api/eastmoney/data/securities/api/data/get?type=RPT_USF10_FN_BALANCE&sty=ALL&filter=(SECUCODE="${secucode}")(STD_ITEM_CODE="004017999")&p=1&ps=1&sr=-1&st=REPORT_DATE`
-    const response = await fetch(url)
-    if (!response.ok) return 0
+    // 获取股东权益合计 (004017999) 和总负债 (004011999)
+    const [equityRes, debtRes] = await Promise.all([
+      fetch(`/api/eastmoney/data/securities/api/data/get?type=RPT_USF10_FN_BALANCE&sty=ALL&filter=(SECUCODE="${secucode}")(STD_ITEM_CODE="004017999")&p=1&ps=1&sr=-1&st=REPORT_DATE`),
+      fetch(`/api/eastmoney/data/securities/api/data/get?type=RPT_USF10_FN_BALANCE&sty=ALL&filter=(SECUCODE="${secucode}")(STD_ITEM_CODE="004011999")&p=1&ps=1&sr=-1&st=REPORT_DATE`)
+    ])
     
-    const data = await response.json()
-    const equity = data.result?.data?.[0]?.AMOUNT || 0
-    console.log(`获取股东权益: ${secucode} = ${equity}`)
-    return equity
+    let equity = 0, totalDebt = 0
+    
+    if (equityRes.ok) {
+      const data = await equityRes.json()
+      equity = data.result?.data?.[0]?.AMOUNT || 0
+    }
+    
+    if (debtRes.ok) {
+      const data = await debtRes.json()
+      totalDebt = data.result?.data?.[0]?.AMOUNT || 0
+    }
+    
+    console.log(`美股资产负债表: ${secucode} 股东权益=${(equity/1e9).toFixed(1)}B 总负债=${(totalDebt/1e9).toFixed(1)}B`)
+    return { equity, totalDebt }
   } catch (error) {
-    console.error('获取股东权益失败:', error)
-    return 0
+    console.error('获取资产负债表失败:', error)
+    return { equity: 0, totalDebt: 0 }
+  }
+}
+
+/**
+ * 获取美股现金流量表数据（计算FCF）
+ * FCF = 经营活动现金流(003999) - 资本支出(005002)
+ */
+async function fetchUSStockCashFlow(secucode) {
+  try {
+    // 获取最新年报的现金流数据
+    // 003999 = 经营活动产生的现金流量净额
+    // 005002 = 购买固定资产（资本支出，通常为负数）
+    const [ocfRes, capexRes] = await Promise.all([
+      fetch(`/api/eastmoney/data/securities/api/data/get?type=RPT_USSK_FN_CASHFLOW&sty=ALL&filter=(SECUCODE="${secucode}")(STD_ITEM_CODE="003999")(DATE_TYPE_CODE="001")&p=1&ps=1&sr=-1&st=REPORT_DATE`),
+      fetch(`/api/eastmoney/data/securities/api/data/get?type=RPT_USSK_FN_CASHFLOW&sty=ALL&filter=(SECUCODE="${secucode}")(STD_ITEM_CODE="005002")(DATE_TYPE_CODE="001")&p=1&ps=1&sr=-1&st=REPORT_DATE`)
+    ])
+    
+    let operatingCashFlow = 0, capitalExpenditure = 0
+    
+    if (ocfRes.ok) {
+      const data = await ocfRes.json()
+      operatingCashFlow = data.result?.data?.[0]?.AMOUNT || 0
+    }
+    
+    if (capexRes.ok) {
+      const data = await capexRes.json()
+      capitalExpenditure = Math.abs(data.result?.data?.[0]?.AMOUNT || 0)  // 取绝对值
+    }
+    
+    const fcf = operatingCashFlow - capitalExpenditure
+    console.log(`美股现金流: ${secucode} OCF=${(operatingCashFlow/1e9).toFixed(1)}B CapEx=${(capitalExpenditure/1e9).toFixed(1)}B FCF=${(fcf/1e9).toFixed(1)}B`)
+    return { operatingCashFlow, capitalExpenditure, fcf }
+  } catch (error) {
+    console.error('获取现金流量表失败:', error)
+    return { operatingCashFlow: 0, capitalExpenditure: 0, fcf: 0 }
   }
 }
 
@@ -543,12 +594,174 @@ function calculateUSStockTTMEps(allData) {
 }
 
 /**
+ * 获取静态EPS（最近年报的每股收益）
+ * 用于计算静态PE
+ */
+function getStaticEps(allData, profitField = 'PARENTNETPROFIT', epsField = 'EPSJB') {
+  if (!allData || allData.length === 0) return { staticEps: 0, annualReportDate: null }
+  
+  // 按报告日期排序（最新在前）
+  const sortedData = [...allData].sort((a, b) => 
+    new Date(b.REPORT_DATE) - new Date(a.REPORT_DATE)
+  )
+  
+  // 查找最近的年报（12月）
+  const annualReport = sortedData.find(d => {
+    const date = new Date(d.REPORT_DATE)
+    return date.getMonth() === 11  // 12月
+  })
+  
+  if (annualReport) {
+    // 获取最新股本（从最新报告推算）
+    const latest = sortedData[0]
+    const latestProfit = latest?.[profitField] || 0
+    const latestEps = latest?.[epsField] || 0
+    const latestShares = latestEps > 0 ? latestProfit / latestEps : 0
+    
+    // 用最新股本重新计算年报EPS（保持一致性）
+    const annualProfit = annualReport[profitField] || 0
+    const staticEps = latestShares > 0 ? annualProfit / latestShares : (annualReport[epsField] || 0)
+    
+    const reportDate = new Date(annualReport.REPORT_DATE)
+    return { 
+      staticEps, 
+      annualReportDate: `${reportDate.getFullYear()}年报`,
+      annualProfit,
+      rawAnnualEps: annualReport[epsField] || 0
+    }
+  }
+  
+  return { staticEps: 0, annualReportDate: null }
+}
+
+/**
+ * 计算A股TTM EPS（滚动12个月每股收益）
+ * 公式：TTM EPS = 当前累计EPS + (上年年报EPS - 上年同期累计EPS)
+ * 例如：2025Q3的TTM = 2025Q3累计 + (2024年报 - 2024Q3累计)
+ */
+/**
+ * 计算港股TTM EPS（使用净利润法，避免股本变化影响）
+ */
+function calculateHKStockTTMEps(allData) {
+  if (!allData || allData.length === 0) return 0
+  
+  // 按报告日期排序（最新在前）
+  const sortedData = [...allData].sort((a, b) => 
+    new Date(b.REPORT_DATE) - new Date(a.REPORT_DATE)
+  )
+  
+  const latest = sortedData[0]
+  const latestDate = new Date(latest?.REPORT_DATE)
+  const latestMonth = latestDate.getMonth() + 1  // 1-12
+  const latestYear = latestDate.getFullYear()
+  
+  // 港股字段：HOLDER_PROFIT=股东应占利润, BASIC_EPS=每股收益
+  const latestProfit = latest?.HOLDER_PROFIT || 0
+  const latestEps = latest?.BASIC_EPS || 0
+  const latestShares = latestEps > 0 ? latestProfit / latestEps : 0
+  
+  // 如果是年报（12月），直接返回
+  if (latestMonth === 12) {
+    console.log(`港股TTM EPS (年报): ${latestEps}`)
+    return latestEps
+  }
+  
+  // 查找上年年报
+  const lastYearAnnual = sortedData.find(d => {
+    const date = new Date(d.REPORT_DATE)
+    return date.getMonth() === 11 && date.getFullYear() === latestYear - 1
+  })
+  
+  // 查找上年同期报告
+  const lastYearSamePeriod = sortedData.find(d => {
+    const date = new Date(d.REPORT_DATE)
+    return date.getMonth() === latestMonth - 1 && date.getFullYear() === latestYear - 1
+  })
+  
+  if (lastYearAnnual && lastYearSamePeriod && latestShares > 0) {
+    const annualProfit = lastYearAnnual.HOLDER_PROFIT || 0
+    const samePeriodProfit = lastYearSamePeriod.HOLDER_PROFIT || 0
+    const q4Profit = annualProfit - samePeriodProfit
+    const ttmProfit = latestProfit + q4Profit
+    const ttmEps = ttmProfit / latestShares
+    
+    console.log(`港股TTM EPS: (${(latestProfit/1e8).toFixed(1)}亿 + ${(q4Profit/1e8).toFixed(1)}亿) / ${(latestShares/1e8).toFixed(1)}亿股 = ${ttmEps.toFixed(2)}`)
+    return ttmEps
+  }
+  
+  // 如果没有足够数据，使用年化估算
+  const annualizedEps = latestMonth === 3 ? latestEps * 4 :
+                        latestMonth === 6 ? latestEps * 2 :
+                        latestMonth === 9 ? latestEps * 4 / 3 : latestEps
+  console.log(`港股TTM EPS (年化估算): ${latestEps} * ${12/latestMonth} = ${annualizedEps.toFixed(2)}`)
+  return annualizedEps
+}
+
+function calculateAStockTTMEps(allData) {
+  if (!allData || allData.length === 0) return 0
+  
+  // 按报告日期排序（最新在前）
+  const sortedData = [...allData].sort((a, b) => 
+    new Date(b.REPORT_DATE) - new Date(a.REPORT_DATE)
+  )
+  
+  const latest = sortedData[0]
+  const latestDate = new Date(latest?.REPORT_DATE)
+  const latestMonth = latestDate.getMonth() + 1  // 1-12
+  const latestYear = latestDate.getFullYear()
+  
+  // 获取最新的净利润和股本
+  const latestProfit = latest?.PARENTNETPROFIT || 0  // 归属净利润
+  const latestEps = latest?.EPSJB || 0
+  // 从最新EPS和净利润反推股本（更准确）
+  const latestShares = latestEps > 0 ? latestProfit / latestEps : 0
+  
+  // 如果是年报（12月），直接返回
+  if (latestMonth === 12) {
+    console.log(`A股TTM EPS (年报): ${latestEps}`)
+    return latestEps
+  }
+  
+  // 查找上年年报
+  const lastYearAnnual = sortedData.find(d => {
+    const date = new Date(d.REPORT_DATE)
+    return date.getMonth() === 11 && date.getFullYear() === latestYear - 1  // 12月 = 11
+  })
+  
+  // 查找上年同期报告
+  const lastYearSamePeriod = sortedData.find(d => {
+    const date = new Date(d.REPORT_DATE)
+    return date.getMonth() === latestMonth - 1 && date.getFullYear() === latestYear - 1
+  })
+  
+  if (lastYearAnnual && lastYearSamePeriod && latestShares > 0) {
+    // 使用净利润计算TTM（避免股本变化导致的EPS不可比）
+    const annualProfit = lastYearAnnual.PARENTNETPROFIT || 0
+    const samePeriodProfit = lastYearSamePeriod.PARENTNETPROFIT || 0
+    const q4Profit = annualProfit - samePeriodProfit  // 上年Q4净利润
+    const ttmProfit = latestProfit + q4Profit  // TTM净利润
+    const ttmEps = ttmProfit / latestShares  // 用最新股本计算TTM EPS
+    
+    console.log(`A股TTM EPS: (${(latestProfit/1e8).toFixed(1)}亿 + ${(q4Profit/1e8).toFixed(1)}亿) / ${(latestShares/1e8).toFixed(1)}亿股 = ${ttmEps.toFixed(2)}`)
+    return ttmEps
+  }
+  
+  // 如果没有足够数据，使用年化估算
+  const annualizedEps = latestMonth === 3 ? latestEps * 4 :
+                        latestMonth === 6 ? latestEps * 2 :
+                        latestMonth === 9 ? latestEps * 4 / 3 : latestEps
+  console.log(`A股TTM EPS (年化估算): ${latestEps} * ${12/latestMonth} = ${annualizedEps.toFixed(2)}`)
+  return annualizedEps
+}
+
+/**
  * 标准化不同市场的财务数据字段
  * @param {Array|Object} rawData - 原始数据（美股为数组，其他为对象）
  * @param {string} marketType - 市场类型
- * @param {number} equity - 股东权益（美股用于计算BPS）
+ * @param {Object} balanceSheet - 资产负债表数据 { equity, totalDebt }
+ * @param {Object} cashFlow - 现金流数据 { operatingCashFlow, capitalExpenditure, fcf }
  */
-function normalizeFinanceData(rawData, marketType, equity = 0) {
+function normalizeFinanceData(rawData, marketType, balanceSheet = { equity: 0, totalDebt: 0 }, cashFlow = { operatingCashFlow: 0, capitalExpenditure: 0, fcf: 0 }) {
   // 美股传入的是数组，需要特殊处理
   const data = Array.isArray(rawData) ? rawData[0] : rawData
   const allData = Array.isArray(rawData) ? rawData : [rawData]
@@ -561,6 +774,22 @@ function normalizeFinanceData(rawData, marketType, equity = 0) {
     const cumulativeReport = allData.find(d => d.DATE_TYPE === '累计季报')
     const annualRoe = annualReport?.ROE_AVG || cumulativeReport?.ROE_AVG || data.ROE_AVG || 0
     
+    // 获取静态EPS（年报EPS）
+    let staticEps = 0
+    let annualReportDate = null
+    if (annualReport) {
+      staticEps = annualReport.BASIC_EPS || 0
+      const reportDate = new Date(annualReport.REPORT_DATE)
+      // 美股财年可能不是12月结束，显示具体日期
+      annualReportDate = `FY${reportDate.getFullYear()}`
+    }
+    
+    // 获取增长率数据（优先使用年报）
+    const growthData = annualReport || cumulativeReport || data
+    const revenueGrowthYOY = growthData?.OPERATE_INCOME_YOY || 0  // 营收同比增长
+    const profitGrowthYOY = growthData?.PARENT_HOLDER_NETPROFIT_YOY || 0  // 净利润同比增长
+    const epsGrowthYOY = growthData?.BASIC_EPS_YOY || 0  // EPS同比增长
+    
     // BPS计算 - 传递股东权益供后续计算（需要配合总股本）
     // 实际BPS将在fetchRealStockData中计算
     let estimatedBps = 0
@@ -568,9 +797,15 @@ function normalizeFinanceData(rawData, marketType, equity = 0) {
     return {
       ...data,
       EPSJB: ttmEps,  // 使用计算的TTM EPS
+      EPSJB_STATIC: staticEps,  // 静态EPS（年报）
+      ANNUAL_REPORT_DATE: annualReportDate,  // 年报日期
       BASIC_EPS_QUARTERLY: data.BASIC_EPS || 0,  // 保留单季度EPS
       BPS: estimatedBps,  // BPS将在fetchRealStockData中用equity/shares计算
-      EQUITY: equity,     // 传递股东权益
+      EQUITY: balanceSheet.equity,     // 传递股东权益
+      TOTAL_DEBT: balanceSheet.totalDebt,  // 传递总负债
+      FCF_TOTAL: cashFlow.fcf,         // 传递年度自由现金流（总额）
+      OCF_TOTAL: cashFlow.operatingCashFlow,  // 经营活动现金流
+      CAPEX_TOTAL: cashFlow.capitalExpenditure,  // 资本支出
       ROEJQ: annualRoe,   // 使用年报ROE
       TOTALOPERATEREVE: data.OPERATE_INCOME || 0,
       PARENTNETPROFIT: data.PARENT_HOLDER_NETPROFIT || 0,
@@ -578,13 +813,25 @@ function normalizeFinanceData(rawData, marketType, equity = 0) {
       MGJYXJJE: data.CFPS || 0,
       INDUSTRY: data.INDUSTRY || 'Technology',
       SECURITY_NAME_ABBR: data.SECURITY_NAME_ABBR || data.SECURITY_CODE,
+      // 增长率数据（年报）
+      REVENUE_GROWTH_YOY: revenueGrowthYOY,
+      PROFIT_GROWTH_YOY: profitGrowthYOY,
+      EPS_GROWTH_YOY: epsGrowthYOY,
       currency: 'USD'
     }
   } else if (marketType === MarketType.HK) {
     // 港股字段映射 (基于实际API返回: RPT_HKF10_FN_MAININDICATOR)
+    // 计算TTM EPS（使用净利润法）
+    const ttmEps = calculateHKStockTTMEps(allData)
+    // 获取静态EPS（年报）
+    const { staticEps, annualReportDate } = getStaticEps(allData, 'HOLDER_PROFIT', 'BASIC_EPS')
+    
     return {
       ...data,
-      EPSJB: data.BASIC_EPS || data.EPS_TTM || 0,
+      EPSJB: ttmEps,  // 使用TTM EPS
+      EPSJB_ORIGINAL: data.BASIC_EPS || 0,  // 保留原始EPS
+      EPSJB_STATIC: staticEps,  // 静态EPS（年报）
+      ANNUAL_REPORT_DATE: annualReportDate,  // 年报日期
       BPS: data.BPS || 0,
       ROEJQ: data.ROE_AVG || data.ROE_YEARLY || 0,
       TOTALOPERATEREVE: data.OPERATE_INCOME || 0,  // 营业收入
@@ -593,12 +840,31 @@ function normalizeFinanceData(rawData, marketType, equity = 0) {
       MGJYXJJE: data.PER_NETCASH_OPERATE || 0,     // 每股经营现金流
       INDUSTRY: data.INDUSTRY || '其他',
       SECURITY_NAME_ABBR: data.SECURITY_NAME_ABBR || data.SECUCODE,
+      // 港股增长率字段
+      REVENUE_GROWTH_YOY: data.OPERATE_INCOME_YOY || 0,  // 营收同比增长
+      PROFIT_GROWTH_YOY: data.HOLDER_PROFIT_YOY || 0,    // 股东应占利润同比增长
+      EPS_GROWTH_YOY: data.BASIC_EPS_YOY || 0,           // EPS同比增长
       currency: 'HKD'
     }
   }
   
-  // A股直接返回
-  return { ...data, currency: 'CNY' }
+  // A股 - 计算TTM EPS并添加增长率数据
+  const ttmEps = calculateAStockTTMEps(allData)
+  // 获取静态EPS（年报）
+  const { staticEps, annualReportDate } = getStaticEps(allData, 'PARENTNETPROFIT', 'EPSJB')
+  
+  return { 
+    ...data, 
+    EPSJB: ttmEps,  // 使用TTM EPS替代累计EPS
+    EPSJB_ORIGINAL: data.EPSJB,  // 保留原始累计EPS
+    EPSJB_STATIC: staticEps,  // 静态EPS（年报）
+    ANNUAL_REPORT_DATE: annualReportDate,  // 年报日期
+    currency: 'CNY',
+    // A股增长率字段
+    REVENUE_GROWTH_YOY: data.TOTALOPERATEREVETZ || 0,  // 营业总收入同比增长
+    PROFIT_GROWTH_YOY: data.PARENTNETPROFITTZ || data.DJD_DPNP_YOY || 0,  // 净利润同比增长
+    EPS_GROWTH_YOY: data.BASICEPS_YOY || 0,  // EPS同比增长
+  }
 }
 
 /**
@@ -658,14 +924,16 @@ export async function fetchRealStockData(code, marketType = null) {
                      (financeData?.PARENT_NETPROFIT ? financeData.PARENT_NETPROFIT / unitDivisor : 0)
     
     // 总股本：优先使用新浪API的数据（更准确）
+    // 统一使用"亿股"作为单位
     let totalShares = 0
-    let totalSharesRaw = 0  // 原始股本数（未除以unitDivisor）
+    let totalSharesRaw = 0  // 原始股本数（股）
+    const sharesUnitDivisor = 100000000  // 固定为亿（不受market影响）
     if (actualMarket === MarketType.US && realtimeData?.totalShares) {
       totalSharesRaw = realtimeData.totalShares
-      totalShares = totalSharesRaw / unitDivisor
+      totalShares = totalSharesRaw / sharesUnitDivisor  // 统一转为亿股
     } else {
       totalSharesRaw = financeData?.TOTAL_SHARE || financeData?.TOTAL_SHARES || 0
-      totalShares = totalSharesRaw ? totalSharesRaw / unitDivisor : 0
+      totalShares = totalSharesRaw ? totalSharesRaw / sharesUnitDivisor : 0
     }
     
     // BPS处理 - 美股使用股东权益/总股本计算
@@ -675,7 +943,20 @@ export async function fetchRealStockData(code, marketType = null) {
       console.log(`美股BPS计算: 股东权益(${(financeData.EQUITY/1e9).toFixed(1)}B) / 股本(${(totalSharesRaw/1e9).toFixed(2)}B) = $${bvps.toFixed(2)}`)
     }
     
-    const fcfPerShare = financeData?.MGJYXJJE || 0
+    // FCF处理
+    let fcfPerShare = financeData?.MGJYXJJE || 0
+    // 美股：优先使用现金流量表的真实FCF数据
+    if (actualMarket === MarketType.US) {
+      if (financeData?.FCF_TOTAL && totalSharesRaw > 0) {
+        // 使用真实FCF数据：FCF总额 / 总股本 = 每股FCF
+        fcfPerShare = financeData.FCF_TOTAL / totalSharesRaw
+        console.log(`美股FCF(真实): FCF(${(financeData.FCF_TOTAL/1e9).toFixed(1)}B) / 股本(${(totalSharesRaw/1e9).toFixed(2)}B) = $${fcfPerShare.toFixed(2)}`)
+      } else if (eps > 0) {
+        // 如果没有真实数据，使用EPS估算（保守）
+        fcfPerShare = eps * 0.80  // 估算：FCF ≈ 净利润 × 80%
+        console.log(`美股FCF(估算): EPS(${eps}) × 0.80 = ${fcfPerShare.toFixed(2)}`)
+      }
+    }
     
     // 获取股价
     const price = realtimeData?.price || 0
@@ -723,7 +1004,9 @@ export async function fetchRealStockData(code, marketType = null) {
       updateTime: realtimeData ? `${realtimeData.date} ${realtimeData.time}` : new Date().toLocaleString(),
       
       // 财务数据
-      eps,
+      eps,  // TTM EPS（动态）
+      epsStatic: financeData?.EPSJB_STATIC || eps,  // 静态EPS（年报）
+      annualReportDate: financeData?.ANNUAL_REPORT_DATE || '',  // 年报日期
       bvps,
       roe,
       revenue,
@@ -732,14 +1015,21 @@ export async function fetchRealStockData(code, marketType = null) {
       sps,
       fcf,
       
+      // 美股总负债（用于DCF等计算）
+      totalDebt: financeData?.TOTAL_DEBT ? financeData.TOTAL_DEBT / unitDivisor : 0,
+      
       // 估算数据
       dividend: eps > 0 ? eps * 0.3 : 0, // 假设30%派息率
       dividendYield: price > 0 && eps > 0 ? (eps * 0.3 / price * 100) : 0,
-      netDebt: 0,
+      netDebt: financeData?.TOTAL_DEBT ? financeData.TOTAL_DEBT / unitDivisor : 0,  // 简化：净债务≈总负债
       
-      // 增长率估算
-      revenueGrowth3Y: roe > 0 ? roe * 0.5 : 10,
-      profitGrowth3Y: roe > 0 ? roe * 0.6 : 10,
+      // 增长率数据 - 优先使用财报真实数据
+      revenueGrowthYOY: financeData?.REVENUE_GROWTH_YOY || 0,  // 营收同比增长(年报)
+      profitGrowthYOY: financeData?.PROFIT_GROWTH_YOY || 0,    // 净利润同比增长(年报)
+      epsGrowthYOY: financeData?.EPS_GROWTH_YOY || 0,          // EPS同比增长(年报)
+      // 兼容旧字段（用于没有真实数据时的估算）
+      revenueGrowth3Y: financeData?.REVENUE_GROWTH_YOY || (roe > 0 ? roe * 0.5 : 10),
+      profitGrowth3Y: financeData?.PROFIT_GROWTH_YOY || (roe > 0 ? roe * 0.6 : 10),
       dividendGrowth3Y: roe > 0 ? roe * 0.4 : 5,
       dividendPayoutRatio: 30,
       

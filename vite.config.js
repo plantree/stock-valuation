@@ -31,6 +31,12 @@ export default defineConfig({
         target: 'https://qt.gtimg.cn',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/tencent/, ''),
+      },
+      // 东方财富搜索API (兼容旧路径)
+      '/api/suggest': {
+        target: 'https://searchapi.eastmoney.com',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/suggest/, '/api/suggest'),
       }
     }
   }

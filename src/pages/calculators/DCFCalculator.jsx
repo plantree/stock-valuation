@@ -26,11 +26,16 @@ function DCFCalculator() {
       setCurrentFCF(stockData.fcf ? stockData.fcf.toString() : '')
       setSharesOutstanding(stockData.sharesOutstanding ? stockData.sharesOutstanding.toString() : '')
       setNetDebt(stockData.netDebt !== undefined ? stockData.netDebt.toString() : '0')
-      // 根据历史增长率设置预期增长率
-      const growth = stockData.profitGrowth3Y || 10
-      setGrowthRate1(Math.min(growth, 25).toFixed(0))
-      setGrowthRate2(Math.min(growth * 0.5, 10).toFixed(0))
-      console.log('DCF计算器填充数据:', stockData)
+      // 根据财报真实增长率设置预期增长率
+      // 优先使用净利润同比增长率，其次使用营收增长率
+      const growth = stockData.profitGrowthYOY || stockData.revenueGrowthYOY || stockData.profitGrowth3Y || 10
+      // 第一阶段：使用财报增长率（限制在5%-30%之间）
+      const g1 = Math.max(5, Math.min(growth, 30))
+      setGrowthRate1(g1.toFixed(0))
+      // 第二阶段：增长率衰减到一半（限制在3%-15%之间）
+      const g2 = Math.max(3, Math.min(g1 * 0.5, 15))
+      setGrowthRate2(g2.toFixed(0))
+      console.log('DCF计算器填充数据:', stockData, '增长率:', growth.toFixed(1) + '%')
     } else {
       setCurrentFCF('')
       setSharesOutstanding('')

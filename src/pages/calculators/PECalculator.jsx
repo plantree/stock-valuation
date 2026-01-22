@@ -9,8 +9,10 @@ import DataSourceInfo from '../../components/DataSourceInfo'
 function PECalculator() {
   const [stockPrice, setStockPrice] = useState('')
   const [eps, setEps] = useState('')
+  const [epsStatic, setEpsStatic] = useState('')  // 静态EPS
   const [industryPE, setIndustryPE] = useState('')
   const [selectedStock, setSelectedStock] = useState(null)
+  const [peType, setPeType] = useState('ttm')  // 'ttm' 或 'static'
 
   // 当选择股票时自动填充数据
   const handleStockSelect = (stockData) => {
@@ -18,18 +20,29 @@ function PECalculator() {
     if (stockData) {
       setStockPrice(stockData.price ? stockData.price.toString() : '')
       setEps(stockData.eps ? stockData.eps.toString() : '')
+      setEpsStatic(stockData.epsStatic ? stockData.epsStatic.toString() : '')
       setIndustryPE(stockData.industryPE ? stockData.industryPE.toString() : '')
-      console.log('PE计算器填充数据:', { price: stockData.price, eps: stockData.eps, industryPE: stockData.industryPE })
+      console.log('PE计算器填充数据:', { 
+        price: stockData.price, 
+        epsTTM: stockData.eps, 
+        epsStatic: stockData.epsStatic,
+        annualReportDate: stockData.annualReportDate,
+        industryPE: stockData.industryPE 
+      })
     } else {
       setStockPrice('')
       setEps('')
+      setEpsStatic('')
       setIndustryPE('')
     }
   }
 
+  // 根据PE类型选择EPS
+  const currentEps = peType === 'ttm' ? eps : epsStatic
+
   const results = useMemo(() => {
     const price = parseFloat(stockPrice)
-    const earnings = parseFloat(eps)
+    const earnings = parseFloat(currentEps)
     const avgPE = parseFloat(industryPE)
 
     if (!price || !earnings || earnings === 0) return null
@@ -60,7 +73,7 @@ function PECalculator() {
       upside: upside?.toFixed(2),
       assessment
     }
-  }, [stockPrice, eps, industryPE])
+  }, [stockPrice, currentEps, industryPE])
 
   return (
     <div className="space-y-8">
@@ -105,13 +118,53 @@ function PECalculator() {
               helpText={selectedStock ? `数据来源: 实时行情` : "股票的当前市场价格"}
             />
             
+            {/* PE类型选择 */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">PE类型</label>
+              <div className="flex space-x-4">
+                <label className="flex items-center cursor-pointer">
+                  <input
+                    type="radio"
+                    name="peType"
+                    value="ttm"
+                    checked={peType === 'ttm'}
+                    onChange={(e) => setPeType(e.target.value)}
+                    className="w-4 h-4 text-primary-600 border-gray-300 focus:ring-primary-500"
+                  />
+                  <span className="ml-2 text-sm text-gray-700">动态PE (TTM)</span>
+                </label>
+                <label className="flex items-center cursor-pointer">
+                  <input
+                    type="radio"
+                    name="peType"
+                    value="static"
+                    checked={peType === 'static'}
+                    onChange={(e) => setPeType(e.target.value)}
+                    className="w-4 h-4 text-primary-600 border-gray-300 focus:ring-primary-500"
+                  />
+                  <span className="ml-2 text-sm text-gray-700">静态PE (年报)</span>
+                </label>
+              </div>
+              <p className="mt-1 text-xs text-gray-500">
+                {peType === 'ttm' 
+                  ? '动态PE使用滚动12个月(TTM)的每股收益计算' 
+                  : `静态PE使用最近年报的每股收益计算${selectedStock?.annualReportDate ? ` (${selectedStock.annualReportDate})` : ''}`}
+              </p>
+            </div>
+
             <InputField
-              label="每股收益 (EPS)"
-              value={eps}
-              onChange={setEps}
+              label={peType === 'ttm' ? "每股收益 (TTM EPS)" : "每股收益 (静态EPS)"}
+              value={currentEps}
+              onChange={peType === 'ttm' ? setEps : setEpsStatic}
               placeholder="请输入EPS"
               unit="元"
-              helpText={selectedStock ? `数据来源: 利润表 (归属净利润/总股本)` : "过去12个月的每股净利润（TTM EPS）"}
+              helpText={selectedStock 
+                ? (peType === 'ttm' 
+                    ? `数据来源: 利润表 (TTM净利润/总股本)` 
+                    : `数据来源: ${selectedStock.annualReportDate || '年报'} (年度净利润/总股本)`)
+                : (peType === 'ttm' 
+                    ? "过去12个月的每股净利润（TTM EPS）" 
+                    : "最近年报的每股净利润")}
             />
 
             <InputField
@@ -127,11 +180,11 @@ function PECalculator() {
           <div className="mt-6">
             <h3 className="text-sm font-medium text-gray-700 mb-2">计算公式</h3>
             <FormulaDisplay
-              formula="PE = 股价 / 每股收益"
+              formula={peType === 'ttm' ? "PE-TTM = 股价 / TTM EPS" : "PE-静态 = 股价 / 年报EPS"}
               variables={[
-                { symbol: 'PE', description: '市盈率' },
+                { symbol: peType === 'ttm' ? 'PE-TTM' : 'PE-静态', description: peType === 'ttm' ? '动态市盈率（滚动12个月）' : '静态市盈率（年报）' },
                 { symbol: '股价', description: '当前市场价格' },
-                { symbol: 'EPS', description: '每股收益 (Earnings Per Share)' }
+                { symbol: peType === 'ttm' ? 'TTM EPS' : '年报EPS', description: peType === 'ttm' ? '滚动12个月每股收益' : '最近年报每股收益' }
               ]}
             />
           </div>
@@ -145,7 +198,7 @@ function PECalculator() {
             <>
               <div className="grid grid-cols-2 gap-4">
                 <ResultCard
-                  title="市盈率 (PE)"
+                  title={peType === 'ttm' ? "动态PE (TTM)" : "静态PE (年报)"}
                   value={results.pe}
                   unit="倍"
                   highlight
