@@ -1,0 +1,39 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+# API Proxies - 使用 Netlify Functions 解决跨域问题
+[[redirects]]
+  from = "/api/sina/*"
+  to = "/.netlify/functions/sina"
+  status = 200
+
+[[redirects]]
+  from = "/api/eastmoney/search/*"
+  to = "/.netlify/functions/eastmoney-search"
+  status = 200
+
+[[redirects]]
+  from = "/api/eastmoney/data/*"
+  to = "/.netlify/functions/eastmoney-data"
+  status = 200
+
+[[redirects]]
+  from = "/api/tencent/*"
+  to = "/.netlify/functions/tencent"
+  status = 200
+
+[[redirects]]
+  from = "/api/suggest/*"
+  to = "/.netlify/functions/suggest"
+  status = 200
+
+# SPA fallback - React Router support
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
