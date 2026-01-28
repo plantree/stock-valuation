@@ -11,12 +11,15 @@ export async function handler(event) {
       }
     })
 
-    const text = await response.text()
+    // 获取原始二进制数据并转换GBK为UTF-8
+    const buffer = await response.arrayBuffer()
+    const decoder = new TextDecoder('gbk')
+    const text = decoder.decode(buffer)
 
     return {
       statusCode: 200,
       headers: {
-        'Content-Type': 'text/plain; charset=gbk',
+        'Content-Type': 'text/plain; charset=utf-8',
         'Access-Control-Allow-Origin': '*'
       },
       body: text
