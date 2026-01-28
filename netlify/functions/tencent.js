@@ -1,3 +1,5 @@
+import iconv from 'iconv-lite'
+
 // 腾讯股票行情API代理
 export async function handler(event) {
   const path = event.path.replace('/api/tencent', '') || '/'
@@ -11,10 +13,9 @@ export async function handler(event) {
       }
     })
 
-    // 获取原始二进制数据并转换GBK为UTF-8
+    // 获取原始二进制数据并使用iconv-lite转换GBK为UTF-8
     const buffer = await response.arrayBuffer()
-    const decoder = new TextDecoder('gbk')
-    const text = decoder.decode(buffer)
+    const text = iconv.decode(Buffer.from(buffer), 'gbk')
 
     return {
       statusCode: 200,

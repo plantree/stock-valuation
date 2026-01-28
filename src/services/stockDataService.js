@@ -258,10 +258,8 @@ export async function fetchSinaRealtime(code, marketType = null) {
       throw new Error(`新浪API请求失败: ${response.status}`)
     }
     
-    // 新浪返回的是GBK编码，需要正确解码
-    const buffer = await response.arrayBuffer()
-    const decoder = new TextDecoder('gbk')
-    const text = decoder.decode(buffer)
+    // Netlify Functions 已经将 GBK 转换为 UTF-8，直接使用 text()
+    const text = await response.text()
     console.log('新浪原始返回:', text)
     
     // 解析不同市场的返回格式

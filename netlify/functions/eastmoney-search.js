@@ -11,15 +11,18 @@ export async function handler(event) {
       }
     })
 
-    const data = await response.json()
+    // 获取原始文本并确保UTF-8编码
+    const buffer = await response.arrayBuffer()
+    const decoder = new TextDecoder('utf-8')
+    const text = decoder.decode(buffer)
 
     return {
       statusCode: 200,
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': 'application/json; charset=utf-8',
         'Access-Control-Allow-Origin': '*'
       },
-      body: JSON.stringify(data)
+      body: text
     }
   } catch (error) {
     return {
